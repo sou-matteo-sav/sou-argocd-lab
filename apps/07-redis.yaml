@@ -1,0 +1,33 @@
+# Wave 2: Redis 7 RHEL 9 (StatefulSet standalone 1 replica, AOF, NetworkPolicy opt-in) nel namespace redis-lab.
+# Indipendente dagli operatori CNPG/RHBK; richiede solo il Secret redis-secret creato in bootstrap.
+# Finalizer omesso intenzionalmente: proteggere il PVC redis-data da eliminazioni in cascata.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: redis
+  namespace: openshift-gitops
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  project: default
+  source:
+    repoURL: "<GIT_REPO_URL>"
+    targetRevision: "<GIT_REVISION>"
+    path: components/redis
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: redis-lab
+  syncPolicy:
+    syncOptions:
+      - ServerSideApply=true
+      - RespectIgnoreDifferences=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 2m
+    # Decommentare dopo il bootstrap iniziale per auto-sync continuo:
+    # automated:
+    #   prune: false
+    #   selfHeal: true

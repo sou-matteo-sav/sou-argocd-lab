@@ -1,0 +1,171 @@
+# Il namespace "gitea" è gestito da components/namespaces.
+# Profilo lab (Single-Node OpenShift + LVM lvms-vg1): dischi e memoria ridotti, anti-affinity preferred.
+# Backup nativo tramite LVM CSI VolumeSnapshot (VolumeSnapshotClass: lvms-vg1). Nessun prerequisito S3 al Day-0.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: gitea-pg
+  namespace: gitea
+spec:
+  instances: 2
+  primaryUpdateStrategy: unsupervised
+  primaryUpdateMethod: switchover
+  affinity:
+    enablePodAntiAffinity: true
+    # preferred su cluster Single-Node (SNO) per permettere lo scheduling di entrambe le istanze sull'unico nodo
+    podAntiAffinityType: preferred
+    topologyKey: kubernetes.io/hostname
+  storage:
+    size: 2Gi
+    storageClass: lvms-vg1
+  walStorage:
+    size: 2Gi
+    storageClass: lvms-vg1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+  postgresql:
+    parameters:
+      # Limitato ben sotto i 2Gi del volume WAL così una replica ferma non può saturare il disco del primary.
+      max_slot_wal_keep_size: "1GB"
+      shared_buffers: "128MB"
+      effective_cache_size: "384MB"
+      work_mem: "4MB"
+      maintenance_work_mem: "64MB"
+  bootstrap:
+    initdb:
+      database: gitea
+      owner: gitea
+      # Nessun secret specificato -> CNPG crea il Secret "gitea-pg-app"
+      # (chiavi: username, password, dbname, host, uri, jdbc-uri)
+  backup:
+    target: prefer-standby
+    volumeSnapshot:
+      className: lvms-vg1 # VolumeSnapshotClass LVM CSI presente sul cluster lab
+      # online: false = cold snapshot consistente sulla replica standby (zero downtime sul primary):
+      # produce uno snapshot autoconsistente di PGDATA + PGWAL ripristinabile senza archiviazione WAL su S3.
+      online: false
+      # Eliminando i Backup CNPG scaduti (gestito dal CronJob in components/gitea-ops), vengono rimossi i VolumeSnapshot.
+      snapshotOwnerReference: backup
+    # --- Day-2 (opzionale): archiviazione WAL continua + PITR verso bucket S3 esterno ---
+    # retentionPolicy: "30d"
+    # barmanObjectStore:
+    #   destinationPath: "s3://<S3_BUCKET>/gitea-pg"
+    #   endpointURL: "<S3_ENDPOINT_URL>"
+    #   # endpointCA:
+    #   #   name: s3-custom-ca
+    #   #   key: ca.crt
+    #   s3Credentials:
+    #     accessKeyId:
+    #       name: gitea-pg-backup-s3
+    #       key: ACCESS_KEY_ID
+    #     secretAccessKey:
+    #       name: gitea-pg-backup-s3
+    #       key: ACCESS_SECRET_KEY
+    #   wal:
+    #     compression: gzip
+    #   data:
+    #     compression: gzip
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: gitea-pg-daily
+  namespace: gitea
+spec:
+  schedule: "0 0 2 * * *" # cron a 6 campi (secondi per primi): ogni giorno alle 02:00:00 UTC
+  backupOwnerReference: self
+  immediate: true # esegue il primo VolumeSnapshot subito dopo l'avvio del cluster
+  method: volumeSnapshot
+  cluster:
+    name: gitea-pg
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: gitea-pg
+  namespace: gitea
+spec:
+  selector:
+    matchLabels:
+      cnpg.io/cluster: gitea-pg
+  podMetricsEndpoints:
+    - port: metrics
+---
+# Alert su saturazione PVC prima dell'esaurimento disco e su errori di archiviazione WAL
+# (CNPGWalArchivingFailed resta silente finché il backup usa solo VolumeSnapshot; si attiva automaticamente
+# quando viene abilitato barmanObjectStore verso S3 in Day-2).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: gitea-pg-alerts
+  namespace: gitea
+spec:
+  groups:
+    - name: gitea-pg-wal-and-storage
+      rules:
+        - alert: CNPGWalArchivingFailed
+          expr: |
+            (cnpg_pg_stat_archiver_last_failed_time - cnpg_pg_stat_archiver_last_archived_time) > 1
+            and on(namespace, pod) cnpg_pg_replication_in_recovery == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "WAL archiving is failing on {{ $labels.pod }}"
+            description: "PostgreSQL primary {{ $labels.pod }} in namespace {{ $labels.namespace }} is failing to archive WAL segments to S3."
+        - alert: GiteaPVCHighUtilization
+          expr: |
+            (
+              kubelet_volume_stats_used_bytes{namespace="gitea"}
+              /
+              kubelet_volume_stats_capacity_bytes{namespace="gitea"}
+            ) > 0.75
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "PVC {{ $labels.persistentvolumeclaim }} > 75% full"
+            description: "PVC {{ $labels.persistentvolumeclaim }} in namespace {{ $labels.namespace }} is at {{ $value | humanizePercentage }} capacity."
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gitea-pg-ingress
+  namespace: gitea
+spec:
+  podSelector:
+    matchLabels:
+      cnpg.io/cluster: gitea-pg
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector: {} # pod in questo namespace: Gitea + le istanze DB stesse
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 8000
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-operators # operatore CNPG -> API stato instance manager
+      ports:
+        - protocol: TCP
+          port: 8000
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values:
+                  - openshift-monitoring
+                  - openshift-user-workload-monitoring
+      ports:
+        - protocol: TCP
+          port: 9187

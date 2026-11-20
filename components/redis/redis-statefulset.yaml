@@ -1,0 +1,134 @@
+# Il namespace "redis-lab" è gestito da components/namespaces; il Secret "redis-secret"
+# va creato out-of-band tramite bootstrap/00-bootstrap-secrets.sh.
+# Profilo lab: namespace dedicato redis-lab, PVC 1Gi su lvms-vg1, memoria ridotta.
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: redis-lab
+  labels:
+    app: redis
+spec:
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+  selector:
+    app: redis
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: redis-lab
+  labels:
+    app: redis
+spec:
+  serviceName: redis
+  replicas: 1 # standalone volutamente: nessun consumer collegato al momento
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: redis
+          # Digest ufficiale di openshift/redis:7-el9 sul cluster lab (OCP 4.22.12)
+          image: registry.redhat.io/rhel9/redis-7@sha256:3c0b0b1783899dfff36e7a8d1f63408a7a85abeb712b961e3919d65a93220b79
+          imagePullPolicy: IfNotPresent
+          args:
+            - run-redis
+            - --appendonly
+            - "yes"
+            - --appendfsync
+            - everysec
+            - --maxmemory
+            - 150mb # ~58% del limit da 256Mi: margine per il copy-on-write durante fork/rewrite AOF
+            - --maxmemory-policy
+            - noeviction
+          ports:
+            - containerPort: 6379
+              name: redis
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-secret
+                  key: database-password
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli -h 127.0.0.1 ping | grep -q PONG
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli -h 127.0.0.1 ping | grep -q PONG
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+          volumeMounts:
+            - name: redis-data
+              mountPath: /var/lib/redis/data
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: lvms-vg1
+        resources:
+          requests:
+            storage: 1Gi
+---
+# Solo i pod nel namespace redis-lab e i namespace con label lab.example.com/redis-client=true possono raggiungere Redis.
+# Per abilitare l'accesso a un'app:  oc label namespace <ns> lab.example.com/redis-client=true
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-ingress
+  namespace: redis-lab
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector: {}
+        - namespaceSelector:
+            matchLabels:
+              lab.example.com/redis-client: "true"
+      ports:
+        - protocol: TCP
+          port: 6379

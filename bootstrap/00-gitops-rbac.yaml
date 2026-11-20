@@ -1,0 +1,71 @@
+# Permessi RBAC aggiuntivi per il controller di OpenShift GitOps sui CRD CNPG, RHBK, Monitoring e VolumeSnapshot.
+# Va applicato da cluster-admin durante il bootstrap (00-bootstrap-secrets.sh) PRIMA di root-app.yaml,
+# perché ClusterRole/admin (assegnato tramite label argocd.argoproj.io/managed-by) non include i CRD
+# di operatori non ancora installati.
+#
+# Principio del minimo privilegio: il ClusterRole è legato tramite RoleBinding ai soli namespace gitea e keycloak.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: openshift-gitops-app-cluster-crds
+rules:
+  - apiGroups:
+      - postgresql.cnpg.io
+    resources:
+      - clusters
+      - scheduledbackups
+      - backups
+      - databases
+      - databaseroles
+      - poolers
+    verbs:
+      - "*"
+  - apiGroups:
+      - k8s.keycloak.org
+    resources:
+      - keycloaks
+      - keycloakrealmimports
+    verbs:
+      - "*"
+  - apiGroups:
+      - monitoring.coreos.com
+    resources:
+      - podmonitors
+      - prometheusrules
+      - servicemonitors
+    verbs:
+      - "*"
+  - apiGroups:
+      - snapshot.storage.k8s.io
+    resources:
+      - volumesnapshots
+    verbs:
+      - "*"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: openshift-gitops-app-cluster-crds
+  namespace: gitea
+subjects:
+  - kind: ServiceAccount
+    name: openshift-gitops-argocd-application-controller
+    namespace: openshift-gitops
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: openshift-gitops-app-cluster-crds
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: openshift-gitops-app-cluster-crds
+  namespace: keycloak
+subjects:
+  - kind: ServiceAccount
+    name: openshift-gitops-argocd-application-controller
+    namespace: openshift-gitops
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: openshift-gitops-app-cluster-crds

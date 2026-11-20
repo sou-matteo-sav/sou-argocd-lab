@@ -1,0 +1,23 @@
+# App-of-Apps root: gestisce tutte le Argo CD Application presenti in apps/.
+# Sostituire i placeholder repoURL e targetRevision (es. main) PRIMA di applicare.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: app-cluster-root
+  namespace: openshift-gitops
+spec:
+  project: default
+  source:
+    repoURL: "<GIT_REPO_URL>"
+    targetRevision: "<GIT_REVISION>"
+    path: apps
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: openshift-gitops
+  syncPolicy:
+    syncOptions:
+      - ServerSideApply=true
+    # Decommentare dopo il bootstrap iniziale (approvazione InstallPlan e DB healthy) per auto-sync continuo:
+    # automated:
+    #   prune: false
+    #   selfHeal: true

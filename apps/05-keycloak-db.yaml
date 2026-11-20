@@ -1,0 +1,35 @@
+# Wave 2: cluster PostgreSQL CNPG per Keycloak (keycloak-pg), ScheduledBackup (LVM CSI VolumeSnapshot),
+# CronJob retention, PodMonitor, PrometheusRule, NetworkPolicy e Service/keycloak-service-trusted (keycloak-tls).
+# Sincronizzare DOPO aver approvato l'InstallPlan di cloudnative-pg (Wave 1).
+# Finalizer omesso intenzionalmente: proteggere DB e PVC da eliminazioni in cascata.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: keycloak-db
+  namespace: openshift-gitops
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  project: default
+  source:
+    repoURL: "<GIT_REPO_URL>"
+    targetRevision: "<GIT_REVISION>"
+    path: components/keycloak-db
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: keycloak
+  syncPolicy:
+    syncOptions:
+      - ServerSideApply=true
+      - SkipDryRunOnMissingResource=true
+      - RespectIgnoreDifferences=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 20s
+        factor: 2
+        maxDuration: 5m
+    # Decommentare dopo il bootstrap iniziale per auto-sync continuo:
+    # automated:
+    #   prune: false
+    #   selfHeal: true

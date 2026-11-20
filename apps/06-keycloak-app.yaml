@@ -1,0 +1,35 @@
+# Wave 3: istanza Red Hat Build of Keycloak (2 pod), PodDisruptionBudget e Route reencrypt.
+# Sincronizzare SOLO DOPO che:
+#   - l'InstallPlan di rhbk-operator (Wave 1) è stato approvato e il CSV è Succeeded
+#   - keycloak-db (Wave 2) è healthy (esistono Secret keycloak-pg-app, Service keycloak-pg-rw e Secret keycloak-tls)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: keycloak-app
+  namespace: openshift-gitops
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  project: default
+  source:
+    repoURL: "<GIT_REPO_URL>"
+    targetRevision: "<GIT_REVISION>"
+    path: components/keycloak-app
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: keycloak
+  syncPolicy:
+    syncOptions:
+      - ServerSideApply=true
+      - SkipDryRunOnMissingResource=true
+      - RespectIgnoreDifferences=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 20s
+        factor: 2
+        maxDuration: 5m
+    # Decommentare dopo il bootstrap iniziale per auto-sync continuo:
+    # automated:
+    #   prune: false
+    #   selfHeal: true

@@ -1,0 +1,31 @@
+# Namespace applicativi centralizzati in un'unica Application Argo CD per evitare conflitti di ownership.
+# La label argocd.argoproj.io/managed-by: openshift-gitops istruisce l'operatore OpenShift GitOps
+# a generare automaticamente i Role/RoleBinding necessari al controller in ciascun namespace.
+# Prune=false protegge i namespace (e i relativi PVC) da eliminazioni accidentali durante i sync.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gitea
+  labels:
+    argocd.argoproj.io/managed-by: openshift-gitops
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: keycloak
+  labels:
+    argocd.argoproj.io/managed-by: openshift-gitops
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false
+---
+# Namespace dedicato "redis-lab" per evitare conflitti con eventuali workload esistenti nel namespace "redis".
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: redis-lab
+  labels:
+    argocd.argoproj.io/managed-by: openshift-gitops
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false

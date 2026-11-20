@@ -1,0 +1,307 @@
+# Il namespace "keycloak" è gestito da components/namespaces.
+# Profilo lab (Single-Node OpenShift + LVM lvms-vg1): dischi e memoria ridotti, anti-affinity preferred.
+# Backup nativo tramite LVM CSI VolumeSnapshot (VolumeSnapshotClass: lvms-vg1). Nessun prerequisito S3 al Day-0.
+# Separato da components/keycloak-app affinché keycloak-pg completi initdb ("keycloak-pg-app" / "keycloak-pg-rw")
+# e service-ca popoli "keycloak-tls" PRIMA dell'avvio dei pod Keycloak.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: keycloak-pg
+  namespace: keycloak
+spec:
+  instances: 2
+  primaryUpdateStrategy: unsupervised
+  primaryUpdateMethod: switchover
+  affinity:
+    enablePodAntiAffinity: true
+    # preferred su cluster Single-Node (SNO) per permettere lo scheduling di entrambe le istanze sull'unico nodo
+    podAntiAffinityType: preferred
+    topologyKey: kubernetes.io/hostname
+  storage:
+    size: 2Gi
+    storageClass: lvms-vg1
+  walStorage:
+    size: 2Gi
+    storageClass: lvms-vg1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+  postgresql:
+    parameters:
+      # Default CNPG max_connections=100; il CR Keycloak limita 2 pod * 20 = 40 connessioni.
+      max_slot_wal_keep_size: "1GB"
+      shared_buffers: "128MB"
+      effective_cache_size: "384MB"
+      work_mem: "4MB"
+      maintenance_work_mem: "64MB"
+  bootstrap:
+    initdb:
+      database: keycloak
+      owner: keycloak
+      # Nessun secret specificato -> CNPG crea il Secret "keycloak-pg-app"
+  backup:
+    target: prefer-standby
+    volumeSnapshot:
+      className: lvms-vg1 # VolumeSnapshotClass LVM CSI presente sul cluster lab
+      # online: false = cold snapshot consistente sulla replica standby (zero downtime sul primary):
+      # produce uno snapshot autoconsistente di PGDATA + PGWAL ripristinabile senza archiviazione WAL su S3.
+      online: false
+      # Eliminando i Backup CNPG scaduti (gestito dal CronJob keycloak-pg-snapshot-prune sotto), vengono rimossi i VolumeSnapshot.
+      snapshotOwnerReference: backup
+    # --- Day-2 (opzionale): archiviazione WAL continua + PITR verso bucket S3 esterno ---
+    # retentionPolicy: "30d"
+    # barmanObjectStore:
+    #   destinationPath: "s3://<S3_BUCKET>/keycloak-pg"
+    #   endpointURL: "<S3_ENDPOINT_URL>"
+    #   # endpointCA:
+    #   #   name: s3-custom-ca
+    #   #   key: ca.crt
+    #   s3Credentials:
+    #     accessKeyId:
+    #       name: keycloak-pg-backup-s3
+    #       key: ACCESS_KEY_ID
+    #     secretAccessKey:
+    #       name: keycloak-pg-backup-s3
+    #       key: ACCESS_SECRET_KEY
+    #   wal:
+    #     compression: gzip
+    #   data:
+    #     compression: gzip
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: keycloak-pg-daily
+  namespace: keycloak
+spec:
+  schedule: "0 30 2 * * *" # ogni giorno alle 02:30:00 UTC (sfalsato rispetto a gitea-pg)
+  backupOwnerReference: self
+  immediate: true # esegue il primo VolumeSnapshot subito dopo l'avvio del cluster
+  method: volumeSnapshot
+  cluster:
+    name: keycloak-pg
+---
+# Retention automatica dei VolumeSnapshot CNPG per keycloak-pg (profilo lab: 3 snapshot).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: keycloak-snapshot-pruner
+  namespace: keycloak
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: keycloak-snapshot-pruner
+  namespace: keycloak
+rules:
+  - apiGroups:
+      - postgresql.cnpg.io
+    resources:
+      - backups
+    verbs:
+      - get
+      - list
+      - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: keycloak-snapshot-pruner
+  namespace: keycloak
+subjects:
+  - kind: ServiceAccount
+    name: keycloak-snapshot-pruner
+    namespace: keycloak
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: keycloak-snapshot-pruner
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: keycloak-pg-snapshot-prune
+  namespace: keycloak
+spec:
+  schedule: "0 3 * * *" # 03:00 UTC ogni giorno (30 min dopo keycloak-pg-daily delle 02:30)
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app: keycloak-pg-snapshot-prune
+        spec:
+          serviceAccountName: keycloak-snapshot-pruner
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: snapshot-pruner
+              # Digest ufficiale di openshift/cli:latest sul cluster lab (OCP 4.22.12)
+              image: quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:d69ebc6a9d6bd6f8f75d933ee0f7893b285fb24e994bffc35514ff5211ce68b1
+              imagePullPolicy: IfNotPresent
+              securityContext:
+                allowPrivilegeEscalation: false
+                runAsNonRoot: true
+                capabilities:
+                  drop:
+                    - ALL
+                seccompProfile:
+                  type: RuntimeDefault
+              env:
+                - name: HOME
+                  value: /tmp
+                - name: KEEP_COUNT
+                  value: "3"
+              command:
+                - /bin/sh
+                - -eu
+                - -c
+                - |
+                  NS="keycloak"
+                  KEEP="${KEEP_COUNT:-3}"
+                  LIST="$(oc get backups.postgresql.cnpg.io -n "${NS}" \
+                    -o go-template='{{range .items}}{{if .status}}{{if .status.phase}}{{if and (eq .spec.cluster.name "keycloak-pg") (eq .spec.method "volumeSnapshot") (eq .status.phase "completed")}}{{.metadata.creationTimestamp}} {{.metadata.name}}{{"\n"}}{{end}}{{end}}{{end}}{{end}}' \
+                    | sort)"
+                  COUNT="$(printf '%s\n' "${LIST}" | sed '/^$/d' | wc -l | tr -d ' ')"
+                  if [ "${COUNT}" -gt "${KEEP}" ]; then
+                    DEL_COUNT=$((COUNT - KEEP))
+                    printf '%s\n' "${LIST}" | sed '/^$/d' | head -n "${DEL_COUNT}" | awk '{print $2}' | while read -r ITEM; do
+                      echo "==> Pruning Backup CNPG scaduto: ${ITEM}"
+                      oc delete backups.postgresql.cnpg.io "${ITEM}" -n "${NS}" --ignore-not-found=true
+                    done
+                  else
+                    echo "==> Retention OK per keycloak-pg (${COUNT}/${KEEP})"
+                  fi
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 250m
+                  memory: 256Mi
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir: {}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: keycloak-pg
+  namespace: keycloak
+spec:
+  selector:
+    matchLabels:
+      cnpg.io/cluster: keycloak-pg
+  podMetricsEndpoints:
+    - port: metrics
+---
+# Alert su saturazione PVC prima dell'esaurimento disco e su errori di archiviazione WAL
+# (CNPGWalArchivingFailed resta silente finché il backup usa solo VolumeSnapshot).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: keycloak-pg-alerts
+  namespace: keycloak
+spec:
+  groups:
+    - name: keycloak-pg-wal-and-storage
+      rules:
+        - alert: CNPGWalArchivingFailed
+          expr: |
+            (cnpg_pg_stat_archiver_last_failed_time - cnpg_pg_stat_archiver_last_archived_time) > 1
+            and on(namespace, pod) cnpg_pg_replication_in_recovery == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "WAL archiving is failing on {{ $labels.pod }}"
+            description: "PostgreSQL primary {{ $labels.pod }} in namespace {{ $labels.namespace }} is failing to archive WAL segments to S3."
+        - alert: KeycloakPVCHighUtilization
+          expr: |
+            (
+              kubelet_volume_stats_used_bytes{namespace="keycloak"}
+              /
+              kubelet_volume_stats_capacity_bytes{namespace="keycloak"}
+            ) > 0.75
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "PVC {{ $labels.persistentvolumeclaim }} > 75% full"
+            description: "PVC {{ $labels.persistentvolumeclaim }} in namespace {{ $labels.namespace }} is at {{ $value | humanizePercentage }} capacity."
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: keycloak-pg-ingress
+  namespace: keycloak
+spec:
+  podSelector:
+    matchLabels:
+      cnpg.io/cluster: keycloak-pg
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector: {} # pod Keycloak + le istanze DB stesse
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 8000
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-operators # operatore CNPG
+      ports:
+        - protocol: TCP
+          port: 8000
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values:
+                  - openshift-monitoring
+                  - openshift-user-workload-monitoring
+      ports:
+        - protocol: TCP
+          port: 9187
+---
+# Service di supporto per il TLS della Route OpenShift reencrypt.
+# Creato in keycloak-db così OpenShift service-ca genera il Secret "keycloak-tls" mentre keycloak-pg si inizializza.
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak-service-trusted
+  namespace: keycloak
+  annotations:
+    service.beta.openshift.io/serving-cert-secret-name: keycloak-tls
+  labels:
+    app: keycloak
+    app.kubernetes.io/instance: keycloak
+spec:
+  internalTrafficPolicy: Cluster
+  ports:
+    - name: https
+      port: 8443
+      targetPort: 8443
+      protocol: TCP
+  selector:
+    app: keycloak
+    app.kubernetes.io/managed-by: keycloak-operator
+    app.kubernetes.io/instance: keycloak

@@ -1,0 +1,210 @@
+# Sincronizzata DOPO apps/03-gitea-app.yaml (Wave 4), quando il PVC "gitea-shared-storage" esiste già.
+#
+# Backup giornaliero tramite LVM CSI VolumeSnapshot del PVC /data di Gitea (repository Git, oggetti LFS,
+# allegati, app.ini) coordinato con gitea-pg-daily (02:00 UTC) + retention automatica degli ultimi 3 snapshot
+# validi sia per gitea-shared-storage sia per i Backup CNPG (gitea-pg).
+#
+# VolumeSnapshotClass usata: lvms-vg1 (driver topolvm.io, verificata sul cluster lab).
+# Immagine CLI: immagine ufficiale OpenShift CLI (ImageStream openshift/cli:latest di OCP 4.22.12, digest pinnato).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gitea-snapshot-manager
+  namespace: gitea
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gitea-snapshot-manager
+  namespace: gitea
+rules:
+  - apiGroups:
+      - snapshot.storage.k8s.io
+    resources:
+      - volumesnapshots
+    verbs:
+      - get
+      - list
+      - create
+      - delete
+  - apiGroups:
+      - postgresql.cnpg.io
+    resources:
+      - backups
+    verbs:
+      - get
+      - list
+      - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gitea-snapshot-manager
+  namespace: gitea
+subjects:
+  - kind: ServiceAccount
+    name: gitea-snapshot-manager
+    namespace: gitea
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gitea-snapshot-manager
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: gitea-data-backup
+  namespace: gitea
+spec:
+  schedule: "5 2 * * *" # 02:05 UTC ogni giorno (5 min dopo il VolumeSnapshot gitea-pg-daily delle 02:00)
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app: gitea-data-backup
+        spec:
+          serviceAccountName: gitea-snapshot-manager
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: snapshot-manager
+              # Digest ufficiale di openshift/cli:latest sul cluster lab (OCP 4.22.12)
+              image: quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:d69ebc6a9d6bd6f8f75d933ee0f7893b285fb24e994bffc35514ff5211ce68b1
+              imagePullPolicy: IfNotPresent
+              securityContext:
+                allowPrivilegeEscalation: false
+                runAsNonRoot: true
+                capabilities:
+                  drop:
+                    - ALL
+                seccompProfile:
+                  type: RuntimeDefault
+              env:
+                - name: HOME
+                  value: /tmp
+                - name: KEEP_COUNT
+                  value: "3" # profilo lab: mantiene gli ultimi 3 snapshot validi (gitea-shared-storage + gitea-pg)
+              command:
+                - /bin/sh
+                - -eu
+                - -c
+                - |
+                  NS="gitea"
+                  KEEP="${KEEP_COUNT:-3}"
+                  SNAP_NAME="gitea-data-$(date -u +%Y%m%d-%H%M%S)"
+
+                  echo "==> Creazione VolumeSnapshot CSI ${SNAP_NAME} su lvms-vg1"
+                  cat <<EOF | oc create -f -
+                  apiVersion: snapshot.storage.k8s.io/v1
+                  kind: VolumeSnapshot
+                  metadata:
+                    name: ${SNAP_NAME}
+                    namespace: ${NS}
+                    labels:
+                      app.kubernetes.io/name: gitea
+                      backup-source: gitea-shared-storage
+                  spec:
+                    volumeSnapshotClassName: lvms-vg1
+                    source:
+                      persistentVolumeClaimName: gitea-shared-storage
+                  EOF
+
+                  READY=""
+                  ERR=""
+                  i=0
+                  while [ "$i" -lt 60 ]; do
+                    READY="$(oc get volumesnapshot "${SNAP_NAME}" -n "${NS}" -o jsonpath='{.status.readyToUse}' 2>/dev/null || true)"
+                    ERR="$(oc get volumesnapshot "${SNAP_NAME}" -n "${NS}" -o jsonpath='{.status.error.message}' 2>/dev/null || true)"
+                    if [ "${READY}" = "true" ]; then
+                      echo "==> VolumeSnapshot ${SNAP_NAME} completato (readyToUse=true)"
+                      break
+                    fi
+                    i=$((i + 1))
+                    sleep 5
+                  done
+                  if [ "${READY}" != "true" ]; then
+                    echo "ERRORE: VolumeSnapshot ${SNAP_NAME} non pronto entro 300s (ultimo errore: ${ERR:-nessuno})" >&2
+                    exit 1
+                  fi
+
+                  prune_list() {
+                    KIND="$1"
+                    LIST="$2"
+                    COUNT="$(printf '%s\n' "${LIST}" | sed '/^$/d' | wc -l | tr -d ' ')"
+                    if [ "${COUNT}" -gt "${KEEP}" ]; then
+                      DEL_COUNT=$((COUNT - KEEP))
+                      printf '%s\n' "${LIST}" | sed '/^$/d' | head -n "${DEL_COUNT}" | awk '{print $2}' | while read -r ITEM; do
+                        echo "==> Pruning ${KIND} scaduto: ${ITEM}"
+                        oc delete "${KIND}" "${ITEM}" -n "${NS}" --ignore-not-found=true
+                      done
+                    else
+                      echo "==> Retention OK per ${KIND} (${COUNT}/${KEEP})"
+                    fi
+                  }
+
+                  # Pruning sicuro: elimina solo snapshot/backup completati oltre KEEP_COUNT
+                  GITEA_SNAPS="$(oc get volumesnapshot -n "${NS}" -l backup-source=gitea-shared-storage \
+                    -o go-template='{{range .items}}{{if .status}}{{if .status.readyToUse}}{{.metadata.creationTimestamp}} {{.metadata.name}}{{"\n"}}{{end}}{{end}}{{end}}' \
+                    | sort)"
+                  prune_list "volumesnapshot" "${GITEA_SNAPS}"
+
+                  # Eliminando il Backup CNPG, Kubernetes rimuove i relativi VolumeSnapshot (snapshotOwnerReference: backup)
+                  CNPG_BACKUPS="$(oc get backups.postgresql.cnpg.io -n "${NS}" \
+                    -o go-template='{{range .items}}{{if .status}}{{if .status.phase}}{{if and (eq .spec.cluster.name "gitea-pg") (eq .spec.method "volumeSnapshot") (eq .status.phase "completed")}}{{.metadata.creationTimestamp}} {{.metadata.name}}{{"\n"}}{{end}}{{end}}{{end}}{{end}}' \
+                    | sort)"
+                  prune_list "backups.postgresql.cnpg.io" "${CNPG_BACKUPS}"
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 250m
+                  memory: 256Mi
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir: {}
+---
+# Limita il traffico in ingresso al pod Gitea sulla porta HTTP 3000 (SSH è disabilitato in values-gitea.yaml).
+# Consente: Router OpenShift, Argo CD (openshift-gitops), pod nello stesso namespace e namespace client abilitati.
+# Per consentire a un altro namespace interno di clonare via gitea-http:  oc label namespace <ns> lab.example.com/gitea-client=true
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gitea-ingress
+  namespace: gitea
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: gitea
+      app.kubernetes.io/instance: gitea
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              network.openshift.io/policy-group: ingress
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-ingress
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-gitops
+        - namespaceSelector:
+            matchLabels:
+              lab.example.com/gitea-client: "true"
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 3000

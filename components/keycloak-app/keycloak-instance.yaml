@@ -1,0 +1,91 @@
+# Sincronizzata SOLO dopo che apps/05-keycloak-db.yaml è healthy:
+#   - Il Cluster "keycloak-pg" è healthy (esistono Secret "keycloak-pg-app" e Service "keycloak-pg-rw")
+#   - Il Secret "keycloak-tls" è stato generato da OpenShift service-ca
+# Profilo lab (Single-Node OpenShift): risorse ridotte, anti-affinity preferred.
+apiVersion: k8s.keycloak.org/v2alpha1
+kind: Keycloak
+metadata:
+  name: keycloak
+  namespace: keycloak
+spec:
+  instances: 2
+  db:
+    vendor: postgres
+    host: keycloak-pg-rw.keycloak.svc.cluster.local
+    port: 5432
+    database: keycloak
+    usernameSecret:
+      name: keycloak-pg-app
+      key: username
+    passwordSecret:
+      name: keycloak-pg-app
+      key: password
+    poolInitialSize: 5
+    poolMinSize: 5
+    poolMaxSize: 20 # 2 pod * 20 = 40 connessioni max (< 100 default CNPG)
+  bootstrapAdmin:
+    user:
+      secret: keycloak-admin-secret
+  http:
+    httpEnabled: false # traffico interno cifrato via HTTPS 8443 (Route reencrypt)
+    httpsPort: 8443
+    tlsSecret: keycloak-tls # popolato automaticamente da service-ca tramite Service/keycloak-service-trusted
+  proxy:
+    headers: xforwarded
+  hostname:
+    hostname: keycloak.apps.openshift-ai-lab01.ocp-ai.corp.sourcesense.com
+    strict: true
+  ingress:
+    enabled: false
+  resources:
+    requests:
+      cpu: 250m
+      memory: 1Gi
+    limits:
+      cpu: "1"
+      memory: 2Gi # margine sufficiente per heap JVM (70%) + Infinispan senza OOMKill in lab
+  scheduling:
+    affinity:
+      podAntiAffinity:
+        # preferred su cluster Single-Node (SNO) per permettere lo scheduling di entrambe le istanze sull'unico nodo
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  app: keycloak
+                  app.kubernetes.io/managed-by: keycloak-operator
+                  app.kubernetes.io/instance: keycloak
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: keycloak
+  namespace: keycloak
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: keycloak
+      app.kubernetes.io/managed-by: keycloak-operator
+      app.kubernetes.io/instance: keycloak
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: keycloak
+  namespace: keycloak
+spec:
+  host: keycloak.apps.openshift-ai-lab01.ocp-ai.corp.sourcesense.com
+  to:
+    kind: Service
+    name: keycloak-service-trusted
+    weight: 100
+  port:
+    targetPort: https
+  wildcardPolicy: None
+  tls:
+    termination: reencrypt
+    insecureEdgeTerminationPolicy: Redirect
+    # destinationCACertificate omesso: il Router OpenShift valida automaticamente i certificati service-ca.

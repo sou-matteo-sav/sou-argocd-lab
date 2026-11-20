@@ -1,0 +1,40 @@
+# Wave 3: deploy di Gitea tramite Helm chart ufficiale (multi-source: chart 12.7.0 + values-gitea.yaml dal repo Git).
+# Sincronizzare DOPO che gitea-db (Wave 2) è healthy (esistono Secret gitea-pg-app e Service gitea-pg-rw)
+# e il Secret gitea-admin-secret è stato creato.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gitea-app
+  namespace: openshift-gitops
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  project: default
+  sources:
+    - repoURL: https://dl.gitea.com/charts/
+      chart: gitea
+      targetRevision: 12.7.0
+      helm:
+        releaseName: gitea
+        valueFiles:
+          - $values/components/gitea/values-gitea.yaml
+    - repoURL: "<GIT_REPO_URL>"
+      targetRevision: "<GIT_REVISION>"
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: gitea
+  syncPolicy:
+    syncOptions:
+      - ServerSideApply=true
+      - RespectIgnoreDifferences=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 20s
+        factor: 2
+        maxDuration: 3m
+    # Decommentare dopo il bootstrap iniziale per auto-sync continuo:
+    # automated:
+    #   prune: false
+    #   selfHeal: true

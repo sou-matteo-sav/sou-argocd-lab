@@ -1,0 +1,32 @@
+# Wave 4: CronJob LVM CSI VolumeSnapshot (+ retention 3 snapshot) per /data di Gitea e gitea-pg + NetworkPolicy gitea-ingress.
+# Sincronizzare DOPO gitea-app (Wave 3), quando il PVC gitea-shared-storage è stato creato dal chart Helm.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gitea-ops
+  namespace: openshift-gitops
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+spec:
+  project: default
+  source:
+    repoURL: "<GIT_REPO_URL>"
+    targetRevision: "<GIT_REVISION>"
+    path: components/gitea-ops
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: gitea
+  syncPolicy:
+    syncOptions:
+      - ServerSideApply=true
+      - RespectIgnoreDifferences=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 2m
+    # Decommentare dopo il bootstrap iniziale per auto-sync continuo:
+    # automated:
+    #   prune: false
+    #   selfHeal: true

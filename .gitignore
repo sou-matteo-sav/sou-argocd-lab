@@ -1,0 +1,11 @@
+# Evita commit accidentali di file sensibili o locali su GitHub pubblico
+.env
+.env.*
+*.key
+*.pem
+*.crt
+*secret*.yaml
+!bootstrap/00-bootstrap-secrets.sh
+kubeconfig
+*.kubeconfig
+.DS_Store
