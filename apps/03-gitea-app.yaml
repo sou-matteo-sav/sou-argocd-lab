@@ -18,8 +18,8 @@ spec:
         releaseName: gitea
         valueFiles:
           - $values/components/gitea/values-gitea.yaml
-    - repoURL: "<GIT_REPO_URL>"
-      targetRevision: "<GIT_REVISION>"
+    - repoURL: "https://github.com/sou-matteo-sav/openshift-argocd-lab.git"
+      targetRevision: "main"
       ref: values
   destination:
     server: https://kubernetes.default.svc
