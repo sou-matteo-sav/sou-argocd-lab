@@ -18,6 +18,6 @@ spec:
     syncOptions:
       - ServerSideApply=true
     # Decommentare dopo il bootstrap iniziale (approvazione InstallPlan e DB healthy) per auto-sync continuo:
-    # automated:
-    #   prune: false
-    #   selfHeal: true
+    automated:
+      prune: false
+      selfHeal: true

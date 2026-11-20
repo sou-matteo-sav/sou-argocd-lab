@@ -19,6 +19,6 @@ spec:
     syncOptions:
       - ServerSideApply=true
     # Decommentare dopo il bootstrap iniziale per auto-sync continuo:
-    # automated:
-    #   prune: false
-    #   selfHeal: true
+    automated:
+      prune: false
+      selfHeal: true

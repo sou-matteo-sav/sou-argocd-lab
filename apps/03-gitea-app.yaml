@@ -35,6 +35,6 @@ spec:
         factor: 2
         maxDuration: 3m
     # Decommentare dopo il bootstrap iniziale per auto-sync continuo:
-    # automated:
-    #   prune: false
-    #   selfHeal: true
+    automated:
+      prune: false
+      selfHeal: true
