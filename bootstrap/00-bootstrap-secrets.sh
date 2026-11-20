@@ -7,7 +7,7 @@
 set -euo pipefail
 
 # 00 - PRE-FLIGHT: verifica placeholder Git e prerequisiti cluster (nessun prerequisito S3 al Day-0)
-echo "==> Verifica che non restino placeholder (https://github.com/sou-matteo-sav/openshift-argocd-lab.git, main)"
+echo "==> Verifica che non restino placeholder (<GIT_URL>, <GIT_REVISION>)"
 if grep -rnE '<[A-Z0-9_]+>' bootstrap/root-app.yaml apps/ | grep -vE ':[0-9]+:[[:space:]]*#'; then
   echo "ERRORE: sostituire tutti i placeholder Git sopra prima di eseguire il bootstrap e fare git push." >&2
   exit 1

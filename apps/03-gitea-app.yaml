@@ -18,7 +18,7 @@ spec:
         releaseName: gitea
         valueFiles:
           - $values/components/gitea/values-gitea.yaml
-    - repoURL: "https://github.com/sou-matteo-sav/openshift-argocd-lab.git"
+    - repoURL: "https://github.com/sou-matteo-sav/sou-argocd-lab.git"
       targetRevision: "main"
       ref: values
   destination:

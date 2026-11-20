@@ -39,7 +39,7 @@ lab-cluster_argocd/
 
 ### 1. Compilare i placeholder Git e fare push su GitHub
 Sostituire in `bootstrap/root-app.yaml` e `apps/*.yaml`:
-* `https://github.com/sou-matteo-sav/openshift-argocd-lab.git` (es. `https://github.com/<utente>/<repo>.git`)
+* `https://github.com/sou-matteo-sav/sou-argocd-lab.git` (es. `https://github.com/<utente>/<repo>.git`)
 * `main` (es. `main`)
 
 Eseguire il `git push` sul repository GitHub.

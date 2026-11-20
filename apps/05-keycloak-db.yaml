@@ -12,7 +12,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: "https://github.com/sou-matteo-sav/openshift-argocd-lab.git"
+    repoURL: "https://github.com/sou-matteo-sav/sou-argocd-lab.git"
     targetRevision: "main"
     path: components/keycloak-db
   destination:
