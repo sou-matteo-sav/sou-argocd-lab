@@ -17,6 +17,16 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: redis-lab
+  # Kubernetes inietta campi di default (apiVersion, kind, volumeMode, status.phase) nei volumeClaimTemplates
+  # degli StatefulSet: ignorarli evita falsi OutOfSync su Argo CD.
+  ignoreDifferences:
+    - group: apps
+      kind: StatefulSet
+      jqPathExpressions:
+        - .spec.volumeClaimTemplates[].apiVersion
+        - .spec.volumeClaimTemplates[].kind
+        - .spec.volumeClaimTemplates[].spec.volumeMode
+        - .spec.volumeClaimTemplates[].status
   syncPolicy:
     syncOptions:
       - ServerSideApply=true
